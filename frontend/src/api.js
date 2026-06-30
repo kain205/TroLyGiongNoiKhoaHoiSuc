@@ -36,6 +36,48 @@ export const sendChat = (pid, query) =>
     body: JSON.stringify({ query }),
   }).then(json);
 
+// Streaming chat (SSE over fetch). Calls onMeta (safety alerts, immediate),
+// onDelta ({answer} growing), onDone (final payload), onError. The answer appears
+// progressively so an ICU clinician sees the response forming in real time.
+export async function sendChatStream(pid, query, { onMeta, onDelta, onDone, onError } = {}) {
+  const res = await fetch(`${BASE}/api/patients/${pid}/chat/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok || !res.body) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch { /* ignore */ }
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      let event = "message";
+      let data = "";
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      let parsed;
+      try { parsed = JSON.parse(data); } catch { continue; }
+      if (event === "meta") onMeta?.(parsed);
+      else if (event === "delta") onDelta?.(parsed);
+      else if (event === "done") onDone?.(parsed);
+      else if (event === "error") onError?.(parsed);
+    }
+  }
+}
+
 // Push-to-talk: POST the raw WAV blob, get back {text, latency_s, suggestions}. The UI puts
 // `text` into the editable composer — it is never auto-sent.
 export const transcribeAudio = (blob) =>
@@ -43,4 +85,13 @@ export const transcribeAudio = (blob) =>
     method: "POST",
     headers: { "Content-Type": "audio/wav" },
     body: blob,
+  }).then(json);
+
+// Text-to-speech: send an answer, get back { audio_url } (a hosted .wav, cached 24h
+// on VNPT). The UI plays it directly via an <audio> element.
+export const synthesizeSpeech = (text) =>
+  fetch(`${BASE}/api/tts/synthesize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
   }).then(json);

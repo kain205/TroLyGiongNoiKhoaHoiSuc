@@ -321,3 +321,17 @@ a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-vis
   .patient-grid { grid-template-columns: 1fr; }
   .composer, .chat-header, .drug-suggest, .chat-scroll { padding-left: var(--s4); padding-right: var(--s4); }
 }
+
+/* TTS playback button (VNPT SmartVoice) + message action row */
+.msg-actions { display: flex; align-items: center; gap: var(--s3); margin-top: var(--s2); flex-wrap: wrap; }
+.speak-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.78rem; padding: 2px 10px; border-radius: 999px;
+  border: 1px solid var(--border, #d0d7de); background: transparent;
+  color: var(--text-muted, #57606a); cursor: pointer; line-height: 1.6;
+}
+.speak-btn:hover { background: rgba(0,0,0,0.04); }
+
+/* Streaming answer caret (blinks while SmartBot reply is forming) */
+.stream-caret { display: inline-block; margin-left: 1px; opacity: 0.6; animation: blink 1s step-start infinite; }
+@keyframes blink { 50% { opacity: 0; } }

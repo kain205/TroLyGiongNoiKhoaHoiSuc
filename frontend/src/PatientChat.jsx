@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { getProfile, getAssessment, sendChat, transcribeAudio } from "./api.js";
+import { getProfile, getAssessment, sendChatStream, transcribeAudio, synthesizeSpeech } from "./api.js";
 import { createRecorder } from "./audio.js";
 import {
   IconMic, IconStop, IconSend, IconShield, IconAlert,
@@ -32,6 +32,11 @@ export default function PatientChat() {
   const [suggestions, setSuggestions] = useState([]);
   const scrollRef = useRef(null);
   const recorderRef = useRef(null);
+  // Typewriter animation state for the streaming answer.
+  const typeTargetRef = useRef(""); // full bot answer so far (no alert prefix)
+  const alertTextRef = useRef("");  // safety alert block — shown instantly, never animated
+  const finalRef = useRef(null);    // 'done' payload, applied once typing catches up
+  const typeTimerRef = useRef(null);
 
   useEffect(() => {
     let alive = true;
@@ -48,20 +53,104 @@ export default function PatientChat() {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
   }, [messages, busy]);
 
+  // Stop the typewriter interval on unmount / patient change.
+  useEffect(() => () => stopTyper(), [pid]);
+
+  // Replace the last message (the streaming AI bubble) with an updated version.
+  function updateLast(updater) {
+    setMessages((m) => {
+      const copy = [...m];
+      copy[copy.length - 1] = updater(copy[copy.length - 1]);
+      return copy;
+    });
+  }
+
+  function composeAnswer(typed) {
+    return (alertTextRef.current ? `${alertTextRef.current}\n\n` : "") + typed;
+  }
+
+  function stopTyper() {
+    if (typeTimerRef.current) { clearInterval(typeTimerRef.current); typeTimerRef.current = null; }
+  }
+
+  // Reveal the bot answer a few characters at a time (typewriter). Speeds up when
+  // far behind so long answers never lag, then finalizes the bubble when caught up.
+  function ensureTyper() {
+    if (typeTimerRef.current) return;
+    typeTimerRef.current = setInterval(() => {
+      setMessages((m) => {
+        const last = m[m.length - 1];
+        if (!last || !last.streaming) { stopTyper(); return m; }
+        const shown = last._typed || "";
+        const target = typeTargetRef.current;
+        const copy = [...m];
+        if (shown.length < target.length) {
+          const step = Math.max(2, Math.ceil((target.length - shown.length) / 25));
+          const next = target.slice(0, shown.length + step);
+          copy[copy.length - 1] = { ...last, _typed: next, answer: composeAnswer(next) };
+          return copy;
+        }
+        if (finalRef.current) {
+          stopTyper();
+          copy[copy.length - 1] = { ...toMessage(finalRef.current), streaming: false };
+          return copy;
+        }
+        return m;
+      });
+    }, 18);
+  }
+
   async function submit(e) {
     e.preventDefault();
     const q = input.trim();
     if (!q || busy) return;
-    setMessages((m) => [...m, { role: "user", answer: q }]);
+    setMessages((m) => [
+      ...m,
+      { role: "user", answer: q },
+      { role: "ai", kind: "normal", answer: "", _typed: "", streaming: true }, // live bubble
+    ]);
     setInput(""); setSuggestions([]); setBusy(true);
+    typeTargetRef.current = ""; alertTextRef.current = ""; finalRef.current = null;
+
     try {
-      const resp = await sendChat(pid, q);
-      setMessages((m) => [...m, toMessage(resp)]);
+      await sendChatStream(pid, q, {
+        onMeta: (mta) => {
+          alertTextRef.current = mta.alertText || "";
+          // Safety alert shows instantly (not animated).
+          updateLast((prev) => ({
+            ...prev, kind: mta.alerts?.length ? "alert" : "normal", alerts: mta.alerts,
+            answer: composeAnswer(prev._typed || ""),
+          }));
+        },
+        onDelta: ({ answer }) => { typeTargetRef.current = answer; ensureTyper(); },
+        onDone: (done) => {
+          finalRef.current = done;
+          // Strip the alert prefix so the typewriter target is the bot answer only.
+          const bot = alertTextRef.current && done.answer.startsWith(alertTextRef.current)
+            ? done.answer.slice(alertTextRef.current.length).replace(/^\n+/, "")
+            : done.answer;
+          typeTargetRef.current = bot;
+          ensureTyper();
+          autoPlay(done); // start TTS immediately, in parallel with the text animation
+        },
+        onError: (err) => { stopTyper(); finalRef.current = null; updateLast(() => ({ role: "ai", kind: "error", answer: `Lỗi: ${err.detail}` })); },
+      });
     } catch (err) {
-      setMessages((m) => [...m, { role: "ai", kind: "error", answer: `Lỗi: ${err.message}` }]);
+      stopTyper();
+      updateLast(() => ({ role: "ai", kind: "error", answer: `Lỗi: ${err.message}` }));
     } finally {
       setBusy(false);
     }
+  }
+
+  // Auto-play the answer via TTS when streaming finishes (skips fallbacks/errors).
+  // Browser autoplay policy may block it; the manual 🔊 button remains as fallback.
+  async function autoPlay(done) {
+    if (!done?.answer || done.fallback) return;
+    try {
+      const { audio_url } = await synthesizeSpeech(done.answer);
+      await new Audio(audio_url).play();
+    } catch { /* autoplay blocked or TTS failed — user can press 🔊 */ }
   }
 
   // Push-to-talk: toggle record. On stop we transcribe and drop the text into the EDITABLE box —
@@ -116,7 +205,7 @@ export default function PatientChat() {
             )
           )}
           {openerLoading && <Loading text="Đang đánh giá bệnh nhân…" />}
-          {busy && <Loading text="Đang phân tích…" />}
+          {busy && !messages.at(-1)?.streaming && <Loading text="Đang phân tích…" />}
         </div>
         {suggestions.length > 0 && (
           <div className="drug-suggest">
@@ -173,6 +262,45 @@ const Loading = ({ text }) => (
     <span className="dots"><i /><i /><i /></span> {text}
   </div>
 );
+
+// VNPT SmartVoice TTS playback for an answer. Lazily synthesizes on first click,
+// caches the resulting audio URL, then plays/pauses.
+function SpeakButton({ text }) {
+  const [state, setState] = useState("idle"); // idle | loading | playing
+  const audioRef = useRef(null);
+
+  async function toggle() {
+    if (!text?.trim()) return;
+    if (state === "playing") {
+      audioRef.current?.pause();
+      setState("idle");
+      return;
+    }
+    try {
+      if (!audioRef.current) {
+        setState("loading");
+        const { audio_url } = await synthesizeSpeech(text);
+        const a = new Audio(audio_url);
+        a.onended = () => setState("idle");
+        a.onpause = () => setState((s) => (s === "playing" ? "idle" : s));
+        audioRef.current = a;
+      }
+      await audioRef.current.play();
+      setState("playing");
+    } catch {
+      setState("idle");
+    }
+  }
+
+  return (
+    <button type="button" className="speak-btn" onClick={toggle}
+      aria-label={state === "playing" ? "Dừng đọc" : "Nghe câu trả lời"}
+      title={state === "playing" ? "Dừng đọc" : "Nghe câu trả lời"}>
+      {state === "loading" ? <span className="dots"><i /><i /><i /></span>
+        : state === "playing" ? "⏸ Dừng" : "🔊 Nghe"}
+    </button>
+  );
+}
 
 function ChatHeader({ pid, profile }) {
   const allergyCount = profile?.allergies?.length || 0;
@@ -275,7 +403,7 @@ function AiMessage({ m }) {
         </div>
         <p>{m.answer}</p>
         {m.fallback_reason && <div className="subtle small">Lý do hệ thống: {m.fallback_reason}</div>}
-        <Badge m={m} />
+        <div className="msg-actions"><SpeakButton text={m.answer} /><Badge m={m} /></div>
       </div>
     );
   }
@@ -285,7 +413,11 @@ function AiMessage({ m }) {
       {m.kind === "alert" && (
         <div className="alert-tag"><IconAlert width={17} height={17} /> Cảnh báo an toàn</div>
       )}
-      <p className="answer-text">{m.answer}</p>
+      <p className="answer-text">
+        {m.answer}
+        {m.streaming && !m.answer && <span className="dots"><i /><i /><i /></span>}
+        {m.streaming && m.answer && <span className="stream-caret">▍</span>}
+      </p>
       {m.cited_sources?.length > 0 && (
         <div className="sources">
           <div className="sources-head">Nguồn</div>
@@ -297,7 +429,7 @@ function AiMessage({ m }) {
           ))}
         </div>
       )}
-      <Badge m={m} />
+      {!m.streaming && <div className="msg-actions"><SpeakButton text={m.answer} /><Badge m={m} /></div>}
     </div>
   );
 }

@@ -1,257 +1,55 @@
-# ASR + RAG Clinical Assistant — ICU Decision Support
+# Trợ lý Giọng nói Khoa Hồi sức — ICU Clinical Assistant (VNPT Hackathon)
 
-A proof-of-concept that lets an ICU clinician ask a clinical question by voice and get
-cited treatment guidance in seconds. This repository holds the **data + retrieval + clinical
-scoring** backend: a knowledge base (ICU guidelines), a FHIR R4 patient-context builder, and
-clinical risk calculators.
+Trợ lý cho bác sĩ ICU: hỏi bằng giọng nói, nhận tư vấn lâm sàng có đối chiếu guideline
+trong vài giây. Bác sĩ chọn bệnh nhân (FHIR), hệ thống tính sẵn điểm lâm sàng + cảnh báo
+an toàn thuốc (deterministic), rồi trả lời qua VNPT SmartBot và đọc to qua VNPT SmartVoice.
 
-> Full product spec lives in [requirement_analysis/](requirement_analysis/) (PRD, user flow,
-> evaluation plan, research background).
-
----
-
-## Repository layout
+## Kiến trúc
 
 ```
-src/
-  paths.py              # single source of truth for repo-relative paths
-  preprocessing/        # PDF extraction, markdown cleaning, quality checks
-  db/                   # build_clinical_db.py -> db/clinical_db.sqlite (LOINC + ICD-10)
-  embedding/            # chunker, embedder, retriever, or_client (OpenRouter embed + chat)
-  fhir/                 # fhir_client.py (+ from_file/--file), generate_mock_patients.py
-  scoring/              # calculator.py — MAP, qSOFA, SOFA, NEWS2, eGFR
-  rag/                  # ask.py CLI, pipeline, router, safety gate, generator, verifier, openfda
-    eval/               # gold_retrieval.json, retrieval_eval.py, answer_eval.py
-tests/                  # pytest unit tests (test_calculator.py, test_chunker.py, test_rag.py)
-data/
-  mock/                 # 17 committed mock FHIR bundles (patient_A..Q) + index.json
-  *.md / *.pdf          # source corpora (gitignored)
-db/                     # clinical_db.sqlite (gitignored build artifact)
-chroma_db/  chunks/     # vector store + chunk artifacts (gitignored)
+frontend/  React + Vite (SPA)            → Vercel/Netlify
+server/    Node.js (Express)             → Render/Railway
+             ├─ logic deterministic: scoring, FHIR, safety/OpenFDA, drug-match
+             └─ VNPT cloud: SmartBot (LLM/RAG) + SmartVoice (STT/TTS)
+data/mock/ 18 FHIR R4 bundles (bệnh nhân test)
+data/*.md  4 ICU guidelines → upload lên SmartBot knowledge base
+docs/      tài liệu tích hợp VNPT (SmartBot + SmartVoice)
 ```
 
-Every module resolves files through [src/paths.py](src/paths.py) (`DB_PATH`, `MOCK_DIR`,
-`CHROMA_PATH`, `ENV_FILE`, …) by adding `src/` to `sys.path` — no per-file `parents[N]` guessing.
+Toàn bộ ML (STT/TTS/LLM/RAG) chạy trên VNPT cloud → backend chỉ là lớp orchestration mỏng.
+Phần an toàn lâm sàng (allergy/contraindication/interaction/clinical scores) chạy
+**deterministic** ở `server/`, độc lập với LLM, và render TRƯỚC mọi câu trả lời.
 
----
+## Chạy local
 
-## Setup
+```bash
+# 1. Backend
+cd server && npm install && cp .env.example .env   # điền token VNPT — xem server/README.md
+npm start                                            # http://localhost:8000
 
-```powershell
-conda activate vsf
-pip install -r requirements.txt
+# 2. Frontend (terminal khác)
+cd frontend && npm install --legacy-peer-deps
+npm run dev                                          # http://localhost:5173
 ```
 
-Secrets live in `.env` at the repo root (loaded by `src/embedding/or_client.py`):
+> Chi tiết token VNPT, endpoints, và cấu hình bot: **[server/README.md](server/README.md)**.
 
-```
-OPEN_ROUTER_KEY=sk-or-...
-```
+## Việc cần làm thủ công trên VNPT
 
-> **Windows note:** run the env's python directly (`python ...`) rather than `conda run`, which
-> re-encodes stdout through cp1252 and crashes on Vietnamese text. The modules force UTF-8 stdout
-> themselves; if piping, also set `PYTHONIOENCODING=utf-8`.
+1. Portal hackathon → **Quản lý token** → copy bộ key cho **SmartVoice** + **SmartBot**
+2. SmartBot platform → tạo bot → bật **"Tri thức nâng cao"** → upload `data/*.md` (4 guideline)
+3. Điền token vào `server/.env`
 
----
+## Deploy
 
-## Components
+- **Frontend** (Vercel/Netlify): build `frontend/`, set `VITE_API_BASE` = URL backend
+- **Backend** (Render/Railway): chạy `server/` (long-running, hợp SSE streaming), set các biến VNPT
 
-### 1. Clinical lookup DB
-```powershell
-python src/db/build_clinical_db.py
-```
-Builds `db/clinical_db.sqlite` with `loinc_codes` (28 ICU LOINC codes) and `icd10_codes`
-(~7,900 ICD-10 codes parsed from `data/icd-10_vn.md`).
+## Trạng thái migration
 
-> Known issue: the ICD-10 Vietnamese/English names are noisy (best-effort parse of a messy
-> bilingual source). The FHIR client treats this lookup only as a **fallback** — see below.
+Repo này vừa được chuyển từ stack **Python (FastAPI + local ML)** sang **Node.js + VNPT**.
+Backend Node tại `server/` đã thay thế hoàn toàn; calculator được verify **18/18 parity**
+với bản Python gốc (`server/test/calculator.test.js`).
 
-### 2. Embedding / retrieval (RAG knowledge base)
-```powershell
-python src/embedding/chunker.py        # guidelines -> chunks/icu_chunks.json
-python src/embedding/embedder.py       # chunks -> chroma_db (needs OPEN_ROUTER_KEY)
-python src/embedding/retriever.py      # 10-query evaluation
-```
-
-### 3. FHIR patient context — `src/fhir/fhir_client.py`
-Pulls 9 FHIR R4 resources (Patient, Encounter, AllergyIntolerance, Observation,
-MedicationRequest, Condition, MedicationAdministration, Procedure, DiagnosticReport) and
-consolidates them into one `patient_context` dict (demographics, vitals/labs, conditions,
-meds, …).
-
-Two sources:
-```powershell
-# Local mock bundle (offline, recommended for dev)
-python src/fhir/fhir_client.py --file data/mock/patient_A.json
-python src/fhir/fhir_client.py --file data/mock/patient_A.json --json
-
-# Live SMART Health IT R4 sandbox
-python src/fhir/fhir_client.py --find                 # list sandbox patient IDs
-python src/fhir/fhir_client.py --patient <id>
-```
-Status/progress prints go to **stderr**, so `--json` keeps stdout pure. Observations carry unit
-conversions (creatinine mg/dL→µmol/L, temp °F→°C) and keep most-recent readings.
-
-Condition names prefer the resource's own `code.text` / `coding.display` (clean), falling back to
-the SQLite lookup only when the resource omits a name.
-
-### 4. Mock patient cohort — `data/mock/`
-17 hand-curated + generated FHIR bundles (`patient_A.json` … `patient_Q.json`) plus
-[index.json](data/mock/index.json) mapping each to scenarios and edge cases. The sandbox only
-serves outpatient Synthea data, so these provide ICU cases (sepsis, ARDS, AKI, MI, hepatic
-failure) and edge cases (unit conversions, missing vitals, GCS-as-text, no encounter, empty
-sections, extreme values).
-
-Regenerate patients H–Q (A–G are hand-written):
-```powershell
-python src/fhir/generate_mock_patients.py
-```
-
-### 5. Clinical calculators — `src/scoring/calculator.py`
-Derives 5 scores from a `patient_context` dict (pure functions, no network):
-
-| Score | Notes |
-|-------|-------|
-| **MAP** | `(SBP + 2·DBP)/3`, SSC-2021 bands |
-| **qSOFA** | GCS<15, RR≥22, SBP≤100; positive if ≥2 |
-| **SOFA** | 5/6 organs (pulmonary skipped w/o FiO₂); cardiovascular is dose-aware per the SOFA table |
-| **NEWS2** | Scale 1/2 (hypercapnic), per-parameter scoring + risk level |
-| **eGFR** | CKD-EPI 2021 (race-free) + CKD staging + dose-adjustment flag |
-
-```powershell
-python src/scoring/calculator.py --file data/mock/patient_A.json
-python src/scoring/calculator.py --file data/mock/patient_A.json --json
-```
-`calculate_all()` returns `{map, qsofa, sofa, news2, egfr, summary}` ready to attach to the
-patient context for the RAG pipeline. Scoring math coerces values with `get_obs_number` so a
-GCS recorded as text (`"10 (E2 V3 M5)"`) never crashes; eGFR guards `age=None`.
-
-### 6. RAG module — `src/rag/`
-End-to-end cited Q&A (plan: [requirement_analysis/06_RAG_MODULE_PLAN.md](requirement_analysis/06_RAG_MODULE_PLAN.md)):
-
-```powershell
-python src/rag/ask.py --file data/mock/patient_A.json --query "Bệnh nhân dị ứng Penicillin, dùng Amoxicillin được không?"
-python src/rag/ask.py --query "chống chỉ định đặt nội khí quản"   # guideline-only, no patient
-python src/rag/ask.py --file ... --query "..." --json             # machine-readable
-```
-
-Pipeline: LLM intent router (`query_router.py`) → safety-priority retrieval →
-safety gate (`safety.py` + OpenFDA contraindication/interaction checks, alert always
-renders first) → grounded generation (`generator.py`) → **claim-level faithfulness
-verifier** (`verifier.py`). Grounding is **enforced in code**, not trusted by convention
-(`docs/RAG_GROUNDING_ENFORCEMENT.md`):
-
-- T1 generation emits per-sentence `{text, evidence, citation}`.
-- **Lever 1 — evidence must exist:** a claim citing chunk `[n]` is kept only if ≥80%
-  (`EVIDENCE_MIN_COVERAGE`) of its quoted-evidence tokens actually appear in that chunk (fuzzy,
-  diacritic/unit-insensitive). A fabricated quote is dropped by code, never rubber-stamped.
-- **Lever 2 — claim ⊆ evidence:** a grounded claim is then checked by a local mDeBERTa-XNLI model
-  with `premise = its own evidence span, hypothesis = the claim` (`VERIFY_EVIDENCE_NLI`). The claim
-  is dropped only when the NLI is *confident* it is not entailed (`NLI_REJECT_CONF = 0.7`), so
-  faithful VN paraphrases survive while real-but-insufficient over-claims are caught.
-- Claims citing no chunk (patient-data / pre-computed scores) go to the chunk-level backend
-  (`llm` = `openai/gpt-5.4-mini`, or offline `local_nli`/`hybrid`).
-- A code decision tree decides keep / strip / fallback: any **contradiction**, any unsupported
-  **safety** claim, or a broken **ordered procedure** → fall back the whole answer; ordinary surplus
-  is stripped. Verifier outage → **fail-closed** for safety, **fail-open with a visible banner**
-  otherwise.
-- A non-fallback answer without a valid `[n]` citation is still replaced by the "Không đủ
-  thông tin" fallback (F-RAG-09); scoring-intent answers are grounded in `calculate_all()`.
-
-Generation: `qwen/qwen3.6-flash` with **reasoning disabled** (`GEN_REASONING_ENABLED = False`).
-qwen3.6 is a reasoning model whose hidden chain-of-thought is ~90% of completion tokens and
-dominated latency; disabling it cut generation ~7× (total p50 ~32s → ~8–12s) and, unexpectedly,
-raised citation precision 0.69 → ~0.88 (≈ the `plus` model). The latency win is solid; the
-**model choice (flash) is a provisional default, not frozen** — the quality numbers rest on small
-n (2 runs, 5–9 in-scope/run) and the real remaining blocker (answer rate 45–55%) plus independent
-validation (NLI set, human-review) haven't landed. `plus` stays reachable via `--gen-model`. See
-`docs/RAG_REPORT.md` §8.3 / §11.
-Verifier: `openai/gpt-5.4-mini`; judge: `openai/gpt-5.4` (`src/rag/config.py`). Every request
-writes a JSONL trace to `logs/rag-YYYYMMDD.jsonl`. Latency probe: `python src/rag/eval/latency_probe.py`.
-
-**Evaluation:**
-```powershell
-python src/rag/eval/retrieval_eval.py   # Hit@1 / Recall@5 / MRR on 45-query gold set
-python src/rag/eval/nli_validation.py   # Phase-1: can a local NLI model be the verifier?
-python src/rag/eval/answer_eval.py      # scenarios + GPT-5.4 judge -> chunks/rag_eval_report.md
-#   ablation flags: --no-verify  --gen-model <slug>  --backend {llm,local_nli,hybrid}
-```
-
----
-
-## Web app (patient-scoped chat)
-
-A React SPA + FastAPI backend over the pipeline: **select a patient first**, then chat scoped
-to that patient — the assistant loads the patient's FHIR profile and opens with a grounded
-assessment before any question (every message carries patient context; single-turn).
-
-```powershell
-# 1. Backend (FastAPI; uvicorn already a dep). Serves /api/* and, if built, the SPA at /.
-uvicorn web.app:app --app-dir src --reload          # http://localhost:8000
-
-# 2. Frontend dev server (separate terminal)
-cd frontend; npm install; npm run dev               # http://localhost:5173
-#    prod bundle instead: npm run build  -> backend then serves it at http://localhost:8000/
-```
-
-Endpoints: `GET /api/patients`, `GET /api/patients/{id}` (profile), `POST …/assessment`
-(opening AI assessment), `POST …/chat` (`{query}`). The backend (`src/web/app.py`) is a pure
-consumer — no pipeline changes. **Note:** per-patient context/assessment caches are valid only
-because the mock bundles are static; on live FHIR they must be removed or short-TTL'd (stale ICU
-data = safety bug). Deep-link refresh on the static-served SPA needs the Vite dev server.
-
-## ASR bake-off (voice input — model selection)
-
-The PRD calls for voice input (push-to-talk → transcript confirm → query). To pick the ASR model
-empirically, `src/asr/` runs the two MultiMed-ST whisper-small fine-tunes head-to-head on
-Vietnamese **drug-name** audio:
-
-```powershell
-# one-time deps (see requirements.txt OPTIONAL block; CUDA torch for the GPU)
-pip install torch --index-url https://download.pytorch.org/whl/cu124
-pip install faster-whisper ctranslate2 transformers jiwer soundfile librosa datasets gTTS
-
-python src/asr/eval/gen_audio.py                            # render VN drug sentences (gTTS, 2 rates)
-python src/asr/eval/asr_bakeoff.py --initial-prompt --real 8   # both models, raw vs recoverable
-```
-
-**The real lever is post-ASR, not the model.** ASR errors on drug names are near-miss phonetic
-garbles ("profile"→Propofol), so a fuzzy **matcher** (`src/asr/drug_match.py`, rapidfuzz,
-**suggest-only**) recovers the intended drug for the doctor to confirm, and a Whisper
-**initial_prompt** biases toward ICU drug vocabulary. The KPI is **recoverable recall** (would the
-right drug be offered?), not raw ASR. Result (`chunks/asr_bakeoff_report.md`, 2026-06-18):
-matcher + prompt turn ~30% raw drug recall into **93.5% recoverable** (whisper-multilingual);
-prompt alone also ~halves WER (0.47→0.22). `whisper-multilingual` is the pick (`ASR_MODEL`),
-**provisional** until confirmed on real voice (`data/asr_probe/README.md`). The matcher SUGGESTS
-only — never auto-rewrites a drug name. Torch is **isolated to `src/asr/*`**; the RAG core and the
-offline tests stay torch-free.
-
-**Production runtime = CTranslate2 / faster-whisper** (`int8_float16`), migrated from the HF
-Transformers runtime (`docs/ASR_CT2_MIGRATION.md`): identical recoverable-recall (93.9%), ~2× faster
-decode (0.89→0.43s), ~half the VRAM, cold-start 7.9→2.1s. Build the CT2 weights once from the cached
-HF model with `python src/asr/eval/convert_ct2.py`; the live transcriber and the bake-off share it.
-
-**Push-to-talk in the web app (live).** The chat composer has a 🎙 button: the browser captures mic
-audio and encodes a mono WAV in-page (`frontend/src/audio.js` — Web Audio API, no MediaRecorder/webm
-so the backend needs no ffmpeg) and POSTs the raw blob to `POST /api/asr/transcribe`. That endpoint
-lazily loads the chosen model (torch stays out of the offline path — same lazy pattern as the RAG
-pipeline), transcribes with the drug-name `initial_prompt`, and returns `{text, latency_s,
-suggestions}`. The transcript lands in the **editable** input — it is **never auto-sent** (the
-doctor reviews and presses Gửi: F-ASR-04/05). Matcher suggestions render as click-to-apply hint
-chips below the composer; clicking one replaces the misheard span in the box (doctor-initiated,
-suggest-only). Note: at the current `SCORE_FLOOR`, common Vietnamese words can produce a few
-spurious chips — display-threshold calibration is deferred to the real-voice probe, deliberately
-not retuned here.
-
-## Tests
-
-```powershell
-pytest tests/ -v
-```
-97 tests: MAP / qSOFA / NEWS2 / eGFR / conversions plus regressions for GCS-as-string and
-age-None (`test_calculator.py`), chunker schema/packing (`test_chunker.py`), the RAG safety
-gate / OpenFDA checks / citation guard / verifier decision tree + evidence-binding (fuzzy
-grounding, NLI confidence gate) / fallback contract with a mocked LLM (`test_rag.py`), the
-query-embedding LRU cache (`test_embedding.py`), and the web API catalog/profile endpoints
-offline (`test_web.py`). All offline and **torch-free** (the local NLI / ASR models are
-lazy-loaded only in the live pipeline).
+> **Thư mục `src/` (Python), `tests/`, `requirements.txt`, `requirement_analysis/` là LEGACY**
+> — giữ tạm làm tham chiếu. Sẽ xóa sau khi tích hợp VNPT được kiểm thử end-to-end với token thật.
