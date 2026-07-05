@@ -5,13 +5,25 @@ import cors from "cors";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { PORT, CORS_ORIGIN, ROOT } from "./config.js";
+import {
+  PORT,
+  CORS_ORIGIN,
+  ROOT,
+  validateRequiredVnptConfig,
+} from "./config.js";
 import patientsRouter from "./routes/patients.js";
 import asrRouter from "./routes/asr.js";
 import ttsRouter from "./routes/tts.js";
 import { NotFoundError } from "./patientStore.js";
 
+validateRequiredVnptConfig();
+
 const app = express();
+
+app.use((req, res, next) => {
+  res.setHeader("X-Robots-Tag", "noindex, nofollow");
+  next();
+});
 
 app.use(
   cors({
@@ -24,6 +36,9 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.raw({ type: "audio/wav", limit: "15mb" }));
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
+app.get("/robots.txt", (req, res) => {
+  res.type("text/plain").send("User-agent: *\nDisallow: /\n");
+});
 
 app.use("/api", patientsRouter);
 app.use("/api", asrRouter);
@@ -41,9 +56,12 @@ if (existsSync(DIST)) {
 app.use((err, req, res, next) => {
   if (err instanceof NotFoundError) return res.status(404).json({ detail: err.message });
   console.error("[error]", err);
-  res.status(500).json({ detail: err.message || "internal error" });
+  const status = Number.isInteger(err.statusCode) ? err.statusCode : 500;
+  const payload = { detail: err.message || "internal error" };
+  if (err.code) payload.code = err.code;
+  res.status(status).json(payload);
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`ICU assistant backend listening on http://localhost:${PORT}`);
 });

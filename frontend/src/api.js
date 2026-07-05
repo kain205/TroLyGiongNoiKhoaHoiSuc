@@ -1,4 +1,8 @@
-const BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+// Production is served by the Express app, so API calls stay on the current
+// origin. Local Vite development still targets the backend on port 8000.
+const BASE =
+  import.meta.env.VITE_API_BASE ??
+  (import.meta.env.DEV ? "http://localhost:8000" : "");
 
 async function json(res) {
   if (!res.ok) {

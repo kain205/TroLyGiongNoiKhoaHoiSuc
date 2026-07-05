@@ -17,6 +17,7 @@ npm install
 cp .env.example .env      # rồi điền token (xem mục VNPT)
 npm start                 # http://localhost:8000
 npm test                  # vitest — parity với calculator Python
+npm run eval:clinical     # regression live 8 câu chính + 2 câu chống hallucination
 ```
 
 ## Cấu hình VNPT (`.env`)
@@ -33,6 +34,8 @@ gồm `access_token`, `Token-id`, `Token-key`):
 
 **Trên SmartBot platform:** tạo bot → bật **"Tri thức nâng cao"** (bắt buộc, để
 `system_prompt` có hiệu lực) → upload 4 guideline trong `data/*.md` vào knowledge base.
+Sau đó đồng bộ intent và knowledge card theo
+[`docs/SMARTBOT_NLU_SETUP.md`](../docs/SMARTBOT_NLU_SETUP.md).
 
 ## API
 

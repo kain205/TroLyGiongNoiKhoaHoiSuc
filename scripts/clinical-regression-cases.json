@@ -1,0 +1,62 @@
+[
+  {
+    "id": 1,
+    "query": "Mục tiêu MAP trong sốc nhiễm khuẩn theo SSC là bao nhiêu",
+    "intent": "sepsis_ssc",
+    "expect": "clinical_answer"
+  },
+  {
+    "id": 2,
+    "query": "Huyết áp trung bình bao nhiêu thì đạt trong bệnh nhân nhiễm trùng huyết nặng",
+    "intent": "sepsis_ssc",
+    "expect": "clinical_answer"
+  },
+  {
+    "id": 3,
+    "query": "Quy trình chống sốc phản vệ",
+    "intent": "phan_ve",
+    "expect": "clinical_answer"
+  },
+  {
+    "id": 4,
+    "query": "Tiêm adrenaline liều bao nhiêu khi bệnh nhân bị dị ứng nặng tụt huyết áp",
+    "intent": "phan_ve",
+    "expect": "clinical_answer"
+  },
+  {
+    "id": 5,
+    "query": "Tiêu chuẩn chẩn đoán ARDS theo Berlin",
+    "intent": "ards",
+    "expect": "clinical_answer"
+  },
+  {
+    "id": 6,
+    "query": "Bệnh nhân suy hô hấp cấp giảm oxy máu nặng thì chẩn đoán dựa vào gì",
+    "intent": "ards",
+    "expect": "clinical_answer"
+  },
+  {
+    "id": 7,
+    "query": "Chỉnh liều kháng sinh khi suy thận cấp",
+    "intent": "aki_lieu",
+    "expect": "clinical_answer"
+  },
+  {
+    "id": 8,
+    "query": "Bệnh nhân creatinine tăng cao thì liều vancomycin cần giảm bao nhiêu",
+    "intent": "aki_lieu",
+    "expect": "empty_answer"
+  },
+  {
+    "id": 9,
+    "query": "Phác đồ dùng thuốc vận mạch trong sốc tim",
+    "intent": "out_of_scope",
+    "expect": "out_of_scope"
+  },
+  {
+    "id": 10,
+    "query": "Hi",
+    "intent": "greeting",
+    "expect": "greeting"
+  }
+]

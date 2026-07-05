@@ -1,11 +1,12 @@
 // OpenFDA drug-label client for drug-drug interaction + contraindication screening
-// (port of src/rag/openfda.py). Uses native fetch; every failure degrades to [].
+// (port of src/rag/openfda.py). Uses native fetch. Transport/API failures throw
+// so the deterministic safety orchestrator can mark the result as degraded.
 //
 // Caveats (on purpose): labels are unstructured prose, coverage is uneven, indexed
 // by English generic/brand names — a missing alert is NOT a guarantee of safety.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { OPENFDA_API_KEY, DATA_DIR } from "../config.js";
+import { OPENFDA_API_KEY, OPENFDA_CACHE_TTL_HOURS, DATA_DIR } from "../config.js";
 
 const OPENFDA_LABEL_URL = "https://api.fda.gov/drug/label.json";
 const TIMEOUT_MS = 6000;
@@ -13,25 +14,42 @@ const TIMEOUT_MS = 6000;
 const INTERACTION_FIELDS = ["drug_interactions", "drug_and_or_laboratory_test_interactions"];
 const CONTRAINDICATION_FIELDS = ["contraindications"];
 
-const _interactionCache = new Map(); // normalized drug -> string[]
+const CACHE_TTL_MS = OPENFDA_CACHE_TTL_HOURS * 60 * 60 * 1000;
+
+const _interactionCache = new Map(); // normalized drug -> { value: string[], ts: number }
 const _contraindicationCache = new Map();
 
 const CACHE_FILE = resolve(DATA_DIR, "openfda_cache.json");
-_loadCache();
+if (process.env.NODE_ENV !== "test") _loadCache();
 
 function _loadCache() {
   try {
     if (existsSync(CACHE_FILE)) {
       const data = JSON.parse(readFileSync(CACHE_FILE, "utf-8"));
-      for (const [k, v] of Object.entries(data.interaction || {})) _interactionCache.set(k, v);
-      for (const [k, v] of Object.entries(data.contraindication || {})) _contraindicationCache.set(k, v);
+      loadEntries(_interactionCache, data.interaction);
+      loadEntries(_contraindicationCache, data.contraindication);
     }
   } catch {
     /* a corrupt cache must never break startup */
   }
 }
 
+function loadEntries(cache, entries = {}) {
+  for (const [key, entry] of Object.entries(entries || {})) {
+    // Legacy array-only entries have no timestamp. Ignore them so they are
+    // refreshed instead of silently becoming permanent negative results.
+    if (
+      entry &&
+      Array.isArray(entry.value) &&
+      Number.isFinite(entry.ts)
+    ) {
+      cache.set(key, entry);
+    }
+  }
+}
+
 function _persist() {
+  if (process.env.NODE_ENV === "test") return;
   try {
     const out = {
       interaction: Object.fromEntries(_interactionCache),
@@ -70,10 +88,14 @@ async function _fetchJson(url) {
 async function _getLabelSections(drug, fields, cache) {
   const key = norm(drug);
   if (!key) return [];
-  if (cache.has(key)) return cache.get(key);
+  const cached = cache.get(key);
+  if (cached && Date.now() - cached.ts < CACHE_TTL_MS) return cached.value;
+  if (cached) cache.delete(key);
 
   const exists = fields.map((f) => `_exists_:${f}`).join(" OR ");
   let paras = [];
+  let successfulResponses = 0;
+  const errors = [];
   for (const nameField of ["openfda.generic_name", "openfda.brand_name"]) {
     const params = new URLSearchParams({
       search: `${nameField}:"${key}" AND (${exists})`,
@@ -84,8 +106,10 @@ async function _getLabelSections(drug, fields, cache) {
     let data;
     try {
       data = await _fetchJson(url);
-    } catch {
-      continue; // unknown drug (404) / transient error -> try next field
+      successfulResponses += 1;
+    } catch (error) {
+      errors.push(error);
+      continue; // try the alternate generic/brand index before failing
     }
     const results = data.results || [];
     if (!results.length) continue;
@@ -97,7 +121,13 @@ async function _getLabelSections(drug, fields, cache) {
     if (paras.length) break;
   }
 
-  cache.set(key, paras);
+  if (!successfulResponses) {
+    const reason = errors.map((e) => e.message).filter(Boolean).join("; ") || "unknown error";
+    throw new Error(`OpenFDA lookup failed for ${drug}: ${reason}`);
+  }
+
+  // Empty results from a successfully parsed HTTP 200 are a valid cache value.
+  cache.set(key, { value: paras, ts: Date.now() });
   _persist();
   return paras;
 }

@@ -257,6 +257,14 @@ a:focus-visible, button:focus-visible, input:focus-visible, [tabindex]:focus-vis
   border: 1px solid var(--safety); color: var(--safety); border-radius: var(--r-pill);
   font-weight: 500; transition: background var(--t), color var(--t); }
 .drug-chip:hover { background: var(--safety); color: #fff; }
+
+.audio-notice {
+  padding: .45rem var(--s5);
+  border-top: 1px solid var(--warn-line);
+  background: var(--warn-bg);
+  color: var(--ink-2);
+  font-size: .82rem;
+}
 .drug-chip-alt { border-style: dashed; opacity: .9; }
 
 /* ---- composer ---- */

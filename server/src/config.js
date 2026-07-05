@@ -49,6 +49,45 @@ export const SB = {
 };
 
 export const OPENFDA_API_KEY = process.env.OPENFDA_API_KEY || "";
+export const OPENFDA_CACHE_TTL_HOURS = positiveNumber(process.env.OPENFDA_CACHE_TTL_HOURS, 24);
+
+const failMode = (process.env.SAFETY_FAIL_MODE || "caveat").toLowerCase();
+export const SAFETY_FAIL_MODE = failMode === "block" ? "block" : "caveat";
+
+export const AUDIT_LOG_DIR = resolve(
+  ROOT,
+  process.env.AUDIT_LOG_DIR || "server/data/audit",
+);
+export const AUDIT_TRACE_MAX_KB = positiveNumber(process.env.AUDIT_TRACE_MAX_KB, 16);
+
+// Fail fast at process startup when a required VNPT credential is absent.
+// SmartVoice fields may use either their dedicated STT_/TTS_ variable or the
+// shared SV_ fallback supported above. Error messages contain names only.
+export function missingRequiredVnptConfig(env = process.env) {
+  const missing = [];
+  for (const key of ["SB_BOT_ID", "SB_ACCESS_TOKEN", "SB_TOKEN_ID", "SB_TOKEN_KEY"]) {
+    if (!hasValue(env[key])) missing.push(key);
+  }
+
+  for (const service of ["STT", "TTS"]) {
+    for (const field of ["ACCESS_TOKEN", "TOKEN_ID", "TOKEN_KEY"]) {
+      const dedicated = `${service}_${field}`;
+      const sharedKey = `SV_${field}`;
+      if (!hasValue(env[dedicated]) && !hasValue(env[sharedKey])) {
+        missing.push(`${dedicated} (or ${sharedKey})`);
+      }
+    }
+  }
+  return missing;
+}
+
+export function validateRequiredVnptConfig(env = process.env) {
+  const missing = missingRequiredVnptConfig(env);
+  if (!missing.length) return;
+  const error = new Error(`Missing required VNPT configuration: ${missing.join(", ")}`);
+  error.code = "MISSING_VNPT_CONFIG";
+  throw error;
+}
 
 // Auth headers shared by every VNPT call. `accessToken` is stored WITHOUT the
 // "Bearer " prefix in .env; we add it here so callers never have to.
@@ -58,4 +97,13 @@ export function vnptHeaders({ accessToken, tokenId, tokenKey }) {
     "Token-id": tokenId,
     "Token-key": tokenKey,
   };
+}
+
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function hasValue(value) {
+  return typeof value === "string" && value.trim().length > 0;
 }

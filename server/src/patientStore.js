@@ -7,7 +7,7 @@ import { MOCK_DIR } from "./config.js";
 import { FHIRClient } from "./fhir/fhirClient.js";
 import { calculateAll } from "./scoring/calculator.js";
 import { summarizePatient } from "./rag/contextBuilder.js";
-import { checkAllergies, checkContraindications, checkDrugInteractions } from "./safety/safety.js";
+import { runSafetyScan } from "./safety/safety.js";
 
 const GENDER_VI = { male: "Nam", female: "Nữ", other: "Khác", unknown: "Không rõ" };
 
@@ -127,17 +127,8 @@ function normalizeDrugAlert(a) {
 export async function buildAssessment(ctx, calc) {
   const profile = toProfile(ctx, calc);
   const meds = profile.medications.map((m) => m.name).filter(Boolean);
-  let drugAlerts = [];
-  try {
-    const raw = [
-      ...checkAllergies(meds, ctx),
-      ...(await checkContraindications(meds, ctx)),
-      ...(await checkDrugInteractions(meds, ctx)),
-    ];
-    drugAlerts = raw.map(normalizeDrugAlert);
-  } catch (exc) {
-    console.error(`  [assessment safety scan failed] ${exc}`);
-  }
+  const safety = await runSafetyScan(meds, ctx);
+  const drugAlerts = safety.alerts.map(normalizeDrugAlert);
 
   const subtitle = [
     GENDER_VI[profile.gender] || profile.gender,
@@ -154,6 +145,8 @@ export async function buildAssessment(ctx, calc) {
     score_flags: (calc.summary || {}).alerts || [],
     allergies: profile.allergies,
     drug_alerts: drugAlerts,
+    safety_status: safety.status,
+    failed_checks: safety.failedChecks,
     conditions: profile.conditions,
     note:
       "Tóm tắt tự động từ hồ sơ bệnh nhân — không phải khuyến nghị điều trị. " +

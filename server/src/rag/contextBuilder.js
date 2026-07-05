@@ -4,6 +4,11 @@
 // Retrieval is delegated to SmartBot's knowledge base (ICU guidelines uploaded on
 // the platform), so we no longer assemble retrieved chunks here. We inject the
 // clinical role, patient data, and pre-computed safety alerts into system_prompt.
+import {
+  DOMAIN_SOURCE_POLICY,
+  INSUFFICIENT_SENTINEL,
+  SOURCE_CATALOG,
+} from "./clinicalPolicy.js";
 
 // Compact Vietnamese patient summary for the prompt (≈30 lines max).
 export function summarizePatient(ctx, calc) {
@@ -73,14 +78,34 @@ Quy tắc bắt buộc:
 1. TUYỆT ĐỐI không bịa số liệu (liều, thời gian, ngưỡng, giá trị) không có trong guideline. Nếu guideline không nêu con số → không tự thêm.
 2. Khi đưa khuyến cáo, NÊU RÕ tên guideline làm nguồn (vd: "theo Surviving Sepsis Campaign", "theo Quy trình ICU BYT").
 3. Nếu có CẢNH BÁO DỊ ỨNG/AN TOÀN trong dữ liệu bệnh nhân, câu đầu tiên phải nhắc lại cảnh báo đó.
-4. Nếu guideline không đủ để trả lời, nói rõ "Không đủ thông tin trong guideline" thay vì suy diễn.
+4. Nếu guideline không đủ để trả lời, chỉ trả đúng mã ${INSUFFICIENT_SENTINEL}, không thêm giải thích.
 5. Điểm số lâm sàng (NEWS2/qSOFA/SOFA/eGFR/MAP) đã được tính sẵn — dùng đúng giá trị, không tự tính lại.
 6. Trả lời tối đa ~120 từ, súc tích để bác sĩ đọc trong 10 giây.
-7. ĐỐI CHIẾU BỆNH NỀN: nếu bệnh nhân có bệnh nền (suy gan/thận/tim, thai kỳ...) và khuyến cáo cần điều chỉnh/thận trọng/chống chỉ định, BẮT BUỘC nêu rõ lưu ý đó kèm nguồn guideline. Không bịa lưu ý không có trong guideline.`;
+7. ĐỐI CHIẾU BỆNH NỀN: nếu bệnh nhân có bệnh nền (suy gan/thận/tim, thai kỳ...) và khuyến cáo cần điều chỉnh/thận trọng/chống chỉ định, nêu rõ lưu ý đó kèm nguồn guideline. Đây chỉ là lớp hướng dẫn mềm; KHÔNG tuyên bố đã xác minh an toàn nếu lớp deterministic không xác minh được. Cảnh báo deterministic/OpenFDA được cung cấp mới là kết quả kiểm tra an toàn của hệ thống.
+
+TODO: mở rộng lớp deterministic bệnh-nền; không mở rộng quyền quyết định an toàn của LLM.`;
 
 // Assemble the full system_prompt to send to SmartBot (settings.system_prompt).
-export function buildSystemPrompt(patientSummary, alertText, intentHint) {
+export function buildSystemPrompt(patientSummary, alertText, intentHint, safetyContext = {}) {
   const parts = [SYSTEM_ROLE];
+  const domainIntent = safetyContext.domainIntent;
+  const allowedDocuments = (DOMAIN_SOURCE_POLICY[domainIntent] || [])
+    .map((key) => SOURCE_CATALOG[key]?.title || key);
+  if (domainIntent && allowedDocuments.length) {
+    parts.push(
+      "=== PHẠM VI RAG BẮT BUỘC ===\n" +
+      `Intent: ${domainIntent}\n` +
+      `Chỉ sử dụng tài liệu: ${allowedDocuments.join("; ")}.\n` +
+      `Nếu các tài liệu này không chứa dữ kiện cần thiết, trả đúng ${INSUFFICIENT_SENTINEL}.`,
+    );
+  }
+  if (safetyContext.unverified) {
+    parts.push(
+      "=== AN TOÀN THUỐC CHƯA XÁC MINH ===\n" +
+      "Không được nói hoặc ngụ ý rằng thuốc đã được kiểm tra an toàn. " +
+      "Chỉ trình bày thông tin guideline và yêu cầu bác sĩ kiểm tra thủ công.",
+    );
+  }
   if (alertText) {
     parts.push(`=== CẢNH BÁO AN TOÀN (bắt buộc nhắc lại đầu tiên) ===\n${alertText}`);
   }
@@ -91,4 +116,62 @@ export function buildSystemPrompt(patientSummary, alertText, intentHint) {
     );
   }
   return parts.join("\n\n");
+}
+
+// TODO(owner): confirm these default completeness criteria against the live FHIR
+// contract. Empty medication/condition arrays are treated as missing for now.
+export const REQUIRED_FIELDS = {
+  dosing: ["egfr"],
+  contraindication: ["current_medications", "conditions"],
+  scoring: {
+    map: ["systolic_bp", "diastolic_bp"],
+    qsofa: ["gcs", "resp_rate", "systolic_bp"],
+    news2: ["resp_rate", "spo2", "systolic_bp", "heart_rate", "gcs", "temperature"],
+    egfr: ["creatinine", "patient_age"],
+    sofa: ["coagulation", "liver", "cardiovascular", "neurological", "renal"],
+  },
+};
+
+export function findMissingRequiredFields(intent, ctx, calc, scoreTargets = []) {
+  if (intent === "dosing") {
+    return calc?.egfr?.egfr == null ? ["eGFR"] : [];
+  }
+  if (intent === "contraindication") {
+    const missing = [];
+    if (!(ctx?.medications || []).length) missing.push("danh sách thuốc đang dùng");
+    if (!(ctx?.conditions || []).length) missing.push("bệnh nền");
+    return missing;
+  }
+  if (intent !== "scoring" || !scoreTargets.length) return [];
+
+  const missing = [];
+  const obs = ctx?.observations || {};
+  const hasObs = (key) => obs[key]?.value !== null && obs[key]?.value !== undefined;
+  const labels = {
+    systolic_bp: "huyết áp tâm thu",
+    diastolic_bp: "huyết áp tâm trương",
+    gcs: "GCS",
+    resp_rate: "nhịp thở",
+    spo2: "SpO₂",
+    heart_rate: "nhịp tim",
+    temperature: "nhiệt độ",
+    creatinine: "creatinine",
+    patient_age: "tuổi bệnh nhân",
+  };
+
+  for (const target of scoreTargets) {
+    if (target === "sofa") {
+      for (const component of REQUIRED_FIELDS.scoring.sofa) {
+        if (calc?.sofa?.components?.[component]?.missing) {
+          missing.push(`thành phần SOFA ${component}`);
+        }
+      }
+      continue;
+    }
+    for (const field of REQUIRED_FIELDS.scoring[target] || []) {
+      const present = field === "patient_age" ? ctx?.patient?.age != null : hasObs(field);
+      if (!present) missing.push(labels[field] || field);
+    }
+  }
+  return [...new Set(missing)];
 }

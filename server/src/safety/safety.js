@@ -1,6 +1,6 @@
 // Safety gate — allergy / contraindication / drug-interaction screening
-// (port of src/rag/safety.py). check_allergies is pure; the other two call
-// OpenFDA (async) and degrade to [] on any failure.
+// (port of src/rag/safety.py). check_allergies is pure; the OpenFDA checks throw
+// on unavailable evidence and runSafetyScan preserves all completed results.
 import { getInteractionText, getContraindicationText, findMention, norm } from "./openfda.js";
 
 // ICD-description filler words: too generic to be a reliable contraindication trigger.
@@ -139,6 +139,41 @@ export async function checkContraindications(drugs, patientContext) {
     }
   }
   return alerts;
+}
+
+// Deterministic safety orchestration. Each evidence source is isolated so a
+// transient OpenFDA failure can never erase allergy alerts already computed.
+export async function runSafetyScan(drugs, patientContext, { unknownDrugs = [] } = {}) {
+  const alerts = [];
+  const failedChecks = [];
+  const exactDrugs = [...new Set((drugs || []).filter(Boolean))];
+  const unknown = [...new Set((unknownDrugs || []).filter(Boolean))];
+
+  try {
+    alerts.push(...checkAllergies(exactDrugs, patientContext));
+  } catch {
+    failedChecks.push("allergies");
+  }
+
+  try {
+    alerts.push(...(await checkContraindications(exactDrugs, patientContext)));
+  } catch {
+    failedChecks.push("contraindications");
+  }
+
+  try {
+    alerts.push(...(await checkDrugInteractions(exactDrugs, patientContext)));
+  } catch {
+    failedChecks.push("interactions");
+  }
+
+  const status = failedChecks.length
+    ? "degraded"
+    : unknown.length
+      ? "unknown_drug"
+      : "ok";
+
+  return { alerts, status, failedChecks, unknownDrugs: unknown };
 }
 
 // Render alerts as the leading block of a response (allergy first).

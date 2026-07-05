@@ -7,6 +7,11 @@ import {
   IconPill, IconBack, IconClock, IconActivity,
 } from "./icons.jsx";
 
+// A short silent WAV played in a loop from the user's Send gesture. Browsers
+// otherwise reject play() after the async chat + TTS requests finish.
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRsQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YaAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 function initials(name = "") {
   const w = name.trim().split(/\s+/);
   return ((w.at(-1)?.[0] || "") + (w.length > 1 ? w[0][0] : "")).toUpperCase();
@@ -30,8 +35,11 @@ export default function PatientChat() {
   const [recording, setRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [suggestions, setSuggestions] = useState([]);
+  const [audioNotice, setAudioNotice] = useState("");
   const scrollRef = useRef(null);
   const recorderRef = useRef(null);
+  const autoAudioRef = useRef(null);
+  const autoAudioGenerationRef = useRef(0);
   // Typewriter animation state for the streaming answer.
   const typeTargetRef = useRef(""); // full bot answer so far (no alert prefix)
   const alertTextRef = useRef("");  // safety alert block — shown instantly, never animated
@@ -53,8 +61,11 @@ export default function PatientChat() {
     scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
   }, [messages, busy]);
 
-  // Stop the typewriter interval on unmount / patient change.
-  useEffect(() => () => stopTyper(), [pid]);
+  // Stop timers and playback on unmount / patient change.
+  useEffect(() => () => {
+    stopTyper();
+    stopAutoAudio();
+  }, [pid]);
 
   // Replace the last message (the streaming AI bubble) with an updated version.
   function updateLast(updater) {
@@ -104,6 +115,7 @@ export default function PatientChat() {
     e.preventDefault();
     const q = input.trim();
     if (!q || busy) return;
+    primeAutoAudio();
     setMessages((m) => [
       ...m,
       { role: "user", answer: q },
@@ -133,24 +145,69 @@ export default function PatientChat() {
           ensureTyper();
           autoPlay(done); // start TTS immediately, in parallel with the text animation
         },
-        onError: (err) => { stopTyper(); finalRef.current = null; updateLast(() => ({ role: "ai", kind: "error", answer: `Lỗi: ${err.detail}` })); },
+        onError: (err) => {
+          stopTyper();
+          stopAutoAudio();
+          finalRef.current = null;
+          updateLast(() => ({ role: "ai", kind: "error", answer: `Lỗi: ${err.detail}` }));
+        },
       });
     } catch (err) {
       stopTyper();
+      stopAutoAudio();
       updateLast(() => ({ role: "ai", kind: "error", answer: `Lỗi: ${err.message}` }));
     } finally {
       setBusy(false);
     }
   }
 
-  // Auto-play the answer via TTS when streaming finishes (skips fallbacks/errors).
-  // Browser autoplay policy may block it; the manual 🔊 button remains as fallback.
+  // Auto-play every completed answer, including a deliberate fallback/safety message.
+  // The element was already started by primeAutoAudio() inside the Send gesture.
   async function autoPlay(done) {
-    if (!done?.answer || done.fallback) return;
+    const generation = autoAudioGenerationRef.current;
+    if (!done?.answer) {
+      stopAutoAudio();
+      return;
+    }
     try {
       const { audio_url } = await synthesizeSpeech(done.answer);
-      await new Audio(audio_url).play();
-    } catch { /* autoplay blocked or TTS failed — user can press 🔊 */ }
+      if (generation !== autoAudioGenerationRef.current) return;
+      const audio = autoAudioRef.current || new Audio();
+      autoAudioRef.current = audio;
+      audio.loop = false;
+      audio.src = audio_url;
+      audio.currentTime = 0;
+      await audio.play();
+      setAudioNotice("");
+    } catch {
+      if (generation !== autoAudioGenerationRef.current) return;
+      stopAutoAudio();
+      setAudioNotice("Không thể tự phát giọng đọc. Hãy bấm “🔊 Nghe” dưới câu trả lời.");
+    }
+  }
+
+  function primeAutoAudio() {
+    const generation = ++autoAudioGenerationRef.current;
+    setAudioNotice("");
+    const audio = autoAudioRef.current || new Audio();
+    autoAudioRef.current = audio;
+    audio.pause();
+    audio.loop = true;
+    audio.src = SILENT_WAV;
+    audio.currentTime = 0;
+    // This call must stay synchronous with submit() to preserve user activation.
+    audio.play().catch(() => {
+      if (generation !== autoAudioGenerationRef.current) return;
+      setAudioNotice("Trình duyệt đang chặn tự phát âm thanh; nút “🔊 Nghe” vẫn dùng được.");
+    });
+  }
+
+  function stopAutoAudio() {
+    autoAudioGenerationRef.current += 1;
+    const audio = autoAudioRef.current;
+    if (!audio) return;
+    audio.pause();
+    audio.loop = false;
   }
 
   // Push-to-talk: toggle record. On stop we transcribe and drop the text into the EDITABLE box —
@@ -228,6 +285,9 @@ export default function PatientChat() {
               </span>
             ))}
           </div>
+        )}
+        {audioNotice && (
+          <div className="audio-notice" role="status">{audioNotice}</div>
         )}
         <form className="composer" onSubmit={submit}>
           <button
@@ -424,7 +484,10 @@ function AiMessage({ m }) {
           {m.cited_sources.map((s) => (
             <div key={s.n} className="source-item">
               <span className="source-n">[{s.n}]</span>
-              <span>{s.source} — {s.title}</span>
+              <span>
+                {s.title || s.source}
+                {s.pages?.length > 0 ? ` — trang ${s.pages.join(", ")}` : ""}
+              </span>
             </div>
           ))}
         </div>

@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: tro-ly-giong-noi-icu-demo
+    runtime: node
+    region: singapore
+    plan: free
+    buildCommand: npm ci --prefix frontend && npm run build --prefix frontend && npm ci --omit=dev --prefix server
+    startCommand: npm start --prefix server
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STT_ACCESS_TOKEN
+        sync: false
+      - key: STT_TOKEN_ID
+        sync: false
+      - key: STT_TOKEN_KEY
+        sync: false
+      - key: TTS_ACCESS_TOKEN
+        sync: false
+      - key: TTS_TOKEN_ID
+        sync: false
+      - key: TTS_TOKEN_KEY
+        sync: false
+      - key: TTS_REGION
+        value: female_north
+      - key: TTS_MODEL
+        value: news
+      - key: TTS_SPEED
+        value: "1"
+      - key: SB_BOT_ID
+        sync: false
+      - key: SB_ACCESS_TOKEN
+        sync: false
+      - key: SB_TOKEN_ID
+        sync: false
+      - key: SB_TOKEN_KEY
+        sync: false
+      - key: OPENFDA_CACHE_TTL_HOURS
+        value: "24"
+      - key: SAFETY_FAIL_MODE
+        value: caveat
+      - key: AUDIT_LOG_DIR
+        value: server/data/audit
+      - key: AUDIT_TRACE_MAX_KB
+        value: "16"

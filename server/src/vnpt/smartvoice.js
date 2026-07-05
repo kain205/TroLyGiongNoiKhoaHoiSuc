@@ -5,6 +5,16 @@ import { STT, TTS, vnptHeaders } from "../config.js";
 const STT_TIMEOUT_MS = 30000;
 const TTS_TIMEOUT_MS = 30000;
 
+export class SmartVoiceError extends Error {
+  constructor(message, { code = "SMARTVOICE_ERROR", statusCode = 502, upstreamStatus = null, cause } = {}) {
+    super(message, { cause });
+    this.name = "SmartVoiceError";
+    this.code = code;
+    this.statusCode = statusCode;
+    this.upstreamStatus = upstreamStatus;
+  }
+}
+
 // Speech-to-Text (sync). audioBuffer = WAV PCM 16bit mono (≤10MB, ~3–10s).
 // POST multipart to /stt-service/v1/grpc/standard.
 // Returns { text, confidence } — the first alternative of the first result.
@@ -34,6 +44,19 @@ export async function transcribe(audioBuffer, { filename = "audio.wav" } = {}) {
       signal: ctrl.signal,
     });
     raw = await resp.text();
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new SmartVoiceError("Dịch vụ nhận dạng giọng nói đã quá thời gian chờ", {
+        code: "STT_TIMEOUT",
+        statusCode: 503,
+        cause: error,
+      });
+    }
+    throw new SmartVoiceError("Không kết nối được dịch vụ nhận dạng giọng nói", {
+      code: "STT_UPSTREAM_ERROR",
+      statusCode: 502,
+      cause: error,
+    });
   } finally {
     clearTimeout(t);
   }
@@ -46,7 +69,18 @@ export async function transcribe(audioBuffer, { filename = "audio.wav" } = {}) {
   }
   if (!resp.ok) {
     const detail = data?.error || data?.message || raw.slice(0, 200) || resp.statusText;
-    throw new Error(`SmartVoice STT HTTP ${resp.status}: ${detail}`);
+    if (resp.status === 401 || resp.status === 403) {
+      throw new SmartVoiceError("Dịch vụ nhận dạng giọng nói chưa được cấp quyền", {
+        code: "STT_NO_PERMISSION",
+        statusCode: 503,
+        upstreamStatus: resp.status,
+      });
+    }
+    throw new SmartVoiceError(`Dịch vụ nhận dạng giọng nói lỗi: ${detail}`, {
+      code: "STT_UPSTREAM_ERROR",
+      statusCode: 502,
+      upstreamStatus: resp.status,
+    });
   }
 
   const results = data?.object?.results || [];
